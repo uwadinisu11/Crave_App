@@ -13,8 +13,9 @@ import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { CartItem, UserProfile } from '@/types/database';
-import { ArrowLeft, CreditCard, Truck, CheckCircle2 } from 'lucide-react-native';
+import { ArrowLeft, CreditCard } from 'lucide-react-native';
 import { COLORS } from '@/theme/colors';
+import { FlutterwaveButton } from 'flutterwave-react-native';
 
 const SHIPPING_FEE = 2499;
 
@@ -97,6 +98,84 @@ export default function CheckoutScreen() {
     return null;
   };
 
+  const createOrder = async () => {
+    const totalAmount = calculateTotal();
+    const shippingAddress = { street, city, state, country, postal_code: postalCode };
+
+    await supabase.from('user_profiles').upsert({
+      id: user!.id,
+      full_name: fullName,
+      phone,
+      address: shippingAddress,
+    });
+
+    const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .insert({
+        user_id: user!.id,
+        order_number: orderNumber,
+        total_amount: totalAmount,
+        status: 'pending',
+        payment_status: 'pending',
+        shipping_address: shippingAddress,
+      })
+      .select()
+      .single();
+
+    if (orderError) throw orderError;
+
+    const orderItems = cartItems.map((item) => ({
+      order_id: order.id,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      price: item.products!.price,
+    }));
+
+    const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
+
+    if (itemsError) throw itemsError;
+
+    return { order, orderNumber };
+  };
+
+  const handlePaymentSuccess = async (response: any) => {
+    try {
+      const paymentReference = response.transaction_id || response.tx_ref;
+
+      const { error } = await supabase
+        .from('orders')
+        .update({
+          payment_status: 'completed',
+          payment_reference: paymentReference,
+          status: 'processing',
+        })
+        .eq('order_number', response.tx_ref);
+
+      if (error) throw error;
+
+      await supabase.from('cart_items').delete().eq('user_id', user!.id);
+
+      Alert.alert(
+        'Payment Successful!',
+        'Your order has been placed and payment confirmed.',
+        [{ text: 'OK', onPress: () => router.replace('/orders') }]
+      );
+    } catch (err: any) {
+      console.error('Error updating order:', err);
+      Alert.alert('Error', 'Payment was successful but there was an issue updating your order. Please contact support.');
+    }
+  };
+
+  const handlePaymentFailure = async (response: any) => {
+    Alert.alert(
+      'Payment Failed',
+      'Your payment could not be processed. Please try again.',
+      [{ text: 'OK' }]
+    );
+  };
+
   const handlePlaceOrder = async () => {
     const validationError = validateForm();
     if (validationError) {
@@ -108,54 +187,9 @@ export default function CheckoutScreen() {
     setError('');
 
     try {
-      const totalAmount = calculateTotal();
-      const shippingAddress = { street, city, state, country, postal_code: postalCode };
-
-      await supabase.from('user_profiles').upsert({
-        id: user!.id,
-        full_name: fullName,
-        phone,
-        address: shippingAddress,
-      });
-
-      const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-      const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .insert({
-          user_id: user!.id,
-          order_number: orderNumber,
-          total_amount: totalAmount,
-          status: 'pending',
-          payment_status: 'pending',
-          shipping_address: shippingAddress,
-        })
-        .select()
-        .single();
-
-      if (orderError) throw orderError;
-
-      const orderItems = cartItems.map((item) => ({
-        order_id: order.id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        price: item.products!.price,
-      }));
-
-      const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
-
-      if (itemsError) throw itemsError;
-
-      await supabase.from('cart_items').delete().eq('user_id', user!.id);
-
-      Alert.alert(
-        'Order Placed!',
-        `Your order ${orderNumber} has been placed successfully. Total: $${totalAmount.toFixed(2)}. Payment integration with Flutterwave will be added soon.`,
-        [{ text: 'OK', onPress: () => router.replace('/orders') }]
-      );
+      await createOrder();
     } catch (err: any) {
-      setError(err.message || 'Failed to place order');
-    } finally {
+      setError(err.message || 'Failed to create order');
       setProcessing(false);
     }
   };
@@ -265,8 +299,7 @@ export default function CheckoutScreen() {
           <View style={styles.paymentNote}>
             <CreditCard size={24} color={COLORS.primary} />
             <Text style={styles.paymentNoteText}>
-              Flutterwave payment integration will be available soon. Your order will be created with pending
-              payment status.
+              Pay securely with Flutterwave. We accept cards, bank transfers, and mobile money.
             </Text>
           </View>
         </View>
@@ -275,17 +308,49 @@ export default function CheckoutScreen() {
       </ScrollView>
 
       <View style={styles.footer}>
-        <TouchableOpacity
-          style={[styles.placeOrderButton, processing && styles.placeOrderButtonDisabled]}
-          onPress={handlePlaceOrder}
-          disabled={processing}
-        >
-          {processing ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.placeOrderButtonText}>Place Order - ${calculateTotal().toFixed(2)}</Text>
-          )}
-        </TouchableOpacity>
+        {processing ? (
+          <FlutterwaveButton
+            style={styles.placeOrderButton}
+            onPress={async () => {
+              const { orderNumber } = await createOrder();
+              return orderNumber;
+            }}
+            options={{
+              tx_ref: `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              authorization: process.env.EXPO_PUBLIC_FLUTTERWAVE_PUBLIC_KEY!,
+              customer: {
+                email: user?.email || '',
+                phone_number: phone,
+                name: fullName,
+              },
+              amount: calculateTotal(),
+              currency: 'NGN',
+              payment_options: 'card,banktransfer,ussd,mobilemoneyghana',
+            }}
+            onRedirect={handlePaymentSuccess}
+            onAbort={handlePaymentFailure}
+            customButton={(props: any) => (
+              <TouchableOpacity
+                style={styles.placeOrderButton}
+                onPress={props.onPress}
+                disabled={props.disabled}
+              >
+                <Text style={styles.placeOrderButtonText}>
+                  Pay ₦{calculateTotal().toFixed(2)}
+                </Text>
+              </TouchableOpacity>
+            )}
+          />
+        ) : (
+          <TouchableOpacity
+            style={styles.placeOrderButton}
+            onPress={handlePlaceOrder}
+          >
+            <Text style={styles.placeOrderButtonText}>
+              Continue to Payment - ₦{calculateTotal().toFixed(2)}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
