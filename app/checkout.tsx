@@ -15,7 +15,6 @@ import { useAuth } from '@/contexts/AuthContext';
 import { CartItem, UserProfile } from '@/types/database';
 import { ArrowLeft, CreditCard } from 'lucide-react-native';
 import { COLORS } from '@/theme/colors';
-import { FlutterwaveButton } from 'flutterwave-react-native';
 
 const SHIPPING_FEE = 2499;
 
@@ -140,42 +139,6 @@ export default function CheckoutScreen() {
     return { order, orderNumber };
   };
 
-  const handlePaymentSuccess = async (response: any) => {
-    try {
-      const paymentReference = response.transaction_id || response.tx_ref;
-
-      const { error } = await supabase
-        .from('orders')
-        .update({
-          payment_status: 'completed',
-          payment_reference: paymentReference,
-          status: 'processing',
-        })
-        .eq('order_number', response.tx_ref);
-
-      if (error) throw error;
-
-      await supabase.from('cart_items').delete().eq('user_id', user!.id);
-
-      Alert.alert(
-        'Payment Successful!',
-        'Your order has been placed and payment confirmed.',
-        [{ text: 'OK', onPress: () => router.replace('/orders') }]
-      );
-    } catch (err: any) {
-      console.error('Error updating order:', err);
-      Alert.alert('Error', 'Payment was successful but there was an issue updating your order. Please contact support.');
-    }
-  };
-
-  const handlePaymentFailure = async (response: any) => {
-    Alert.alert(
-      'Payment Failed',
-      'Your payment could not be processed. Please try again.',
-      [{ text: 'OK' }]
-    );
-  };
-
   const handlePlaceOrder = async () => {
     const validationError = validateForm();
     if (validationError) {
@@ -187,9 +150,17 @@ export default function CheckoutScreen() {
     setError('');
 
     try {
-      await createOrder();
+      const { order } = await createOrder();
+
+      await supabase.from('cart_items').delete().eq('user_id', user!.id);
+
+      Alert.alert(
+        'Order Created!',
+        `Your order ${order.order_number} has been created successfully.\n\nTotal: ₦${order.total_amount.toFixed(2)}\n\nFlutterwave payment integration is in progress. Your order status is pending payment.`,
+        [{ text: 'OK', onPress: () => router.replace('/orders') }]
+      );
     } catch (err: any) {
-      setError(err.message || 'Failed to create order');
+      setError(err.message || 'Failed to place order');
       setProcessing(false);
     }
   };
@@ -308,49 +279,19 @@ export default function CheckoutScreen() {
       </ScrollView>
 
       <View style={styles.footer}>
-        {processing ? (
-          <FlutterwaveButton
-            style={styles.placeOrderButton}
-            onPress={async () => {
-              const { orderNumber } = await createOrder();
-              return orderNumber;
-            }}
-            options={{
-              tx_ref: `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-              authorization: process.env.EXPO_PUBLIC_FLUTTERWAVE_PUBLIC_KEY!,
-              customer: {
-                email: user?.email || '',
-                phone_number: phone,
-                name: fullName,
-              },
-              amount: calculateTotal(),
-              currency: 'NGN',
-              payment_options: 'card,banktransfer,ussd,mobilemoneyghana',
-            }}
-            onRedirect={handlePaymentSuccess}
-            onAbort={handlePaymentFailure}
-            customButton={(props: any) => (
-              <TouchableOpacity
-                style={styles.placeOrderButton}
-                onPress={props.onPress}
-                disabled={props.disabled}
-              >
-                <Text style={styles.placeOrderButtonText}>
-                  Pay ₦{calculateTotal().toFixed(2)}
-                </Text>
-              </TouchableOpacity>
-            )}
-          />
-        ) : (
-          <TouchableOpacity
-            style={styles.placeOrderButton}
-            onPress={handlePlaceOrder}
-          >
+        <TouchableOpacity
+          style={[styles.placeOrderButton, processing && styles.placeOrderButtonDisabled]}
+          onPress={handlePlaceOrder}
+          disabled={processing}
+        >
+          {processing ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
             <Text style={styles.placeOrderButtonText}>
-              Continue to Payment - ₦{calculateTotal().toFixed(2)}
+              Place Order - ₦{calculateTotal().toFixed(2)}
             </Text>
-          </TouchableOpacity>
-        )}
+          )}
+        </TouchableOpacity>
       </View>
     </View>
   );
